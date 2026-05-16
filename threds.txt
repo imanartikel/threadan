@@ -1,0 +1,232 @@
+[11/05/2026 11:37] Iman: # Daily Affiliate Content Generator
+## Blueprint — Claude Sonnet sebagai Content Engine
+
+---
+
+## Overview
+
+System ini generate konten harian untuk 10 persona affiliate Threads.
+User pilih persona + jenis konten → Claude Sonnet balik caption siap posting + hashtag + hook.
+
+---
+
+## Stack yang Direkomendasikan
+
+- Frontend: React / Next.js (atau HTML biasa juga bisa)
+- AI Engine: Claude Sonnet via Anthropic API (/v1/messages)
+- Storage: localStorage (simpan API key & history) atau Supabase kalau mau persist
+- Deploy: Vercel / Netlify
+
+---
+
+## Struktur Data: 10 Persona
+
+Tiap persona punya object seperti ini. Ini yang lo inject ke system prompt.
+
+{
+  "id": "bapak_hemat",
+  "emoji": "🛒",
+  "name": "Bapak Hemat",
+  "tagline": "Bapak yang gak mau rugi",
+  "niche": "Barang Rumah Tangga · Marketplace",
+  "tone": "Santai, sedikit lebay, bangga kalau dapet deal. Pakai kata 'bapak' untuk self-refer.",
+  "voice_example": "Nih bapak kasih tau, jangan beli dulu sebelum cek ini. Udah bandingin 5 toko, ini yang paling worth it.",
+  "products": [
+    "Perabot rumah (rak, kursi, meja)",
+    "Elektronik rumah (blender, setrika)",
+    "Voucher & promo marketplace",
+    "Alat dapur & perlengkapan mandi",
+    "Produk bundling murah meriah"
+  ],
+  "content_types": [
+    "Tips hemat & promo",
+    "Review produk",
+    "Konten relatable bapak-bapak",
+    "Bandingin harga 3-5 toko"
+  ],
+  "komposisi": {
+    "tips_hemat": 40,
+    "review_produk": 30,
+    "konten_relatable": 20,
+    "hard_sell_cta": 10
+  },
+  "hashtags": ["#TipsBelanja", "#HeritBapak", "#LifehackRumah", "#DiskonHariIni", "#BapakHemat"],
+  "avoid": "Jangan terlalu formal. Jangan bahasa iklan. Jangan hard sell."
+}
+Buat semua 10 persona dengan format yang sama.
+
+---
+
+## Jenis Konten yang Bisa Di-generate
+
+const CONTENT_TYPES = [
+  { id: "tips",      label: "Tips & Edukasi",        komposisi_pct: 35 },
+  { id: "review",    label: "Review Produk",          komposisi_pct: 30 },
+  { id: "relatable", label: "Konten Relatable",       komposisi_pct: 25 },
+  { id: "cta",       label: "Soft Sell + Link Aff",  komposisi_pct: 10 },
+]
+User pilih salah satu, atau bisa auto berdasarkan proporsi.
+
+---
+
+## System Prompt Template
+
+Ini yang lo kirim ke Claude sebagai system:
+
+Kamu adalah {persona.name} — {persona.tagline}.
+
+TENTANG PERSONA INI:
+- Niche: {persona.niche}
+- Tone: {persona.tone}
+- Contoh suara khas: "{persona.voice_example}"
+- Produk yang biasa direkomendasikan: {persona.products.join(", ")}
+- Yang harus dihindari: {persona.avoid}
+
+TUGASMU:
+Generate konten Threads untuk persona ini. Threads mirip Twitter — 
+maksimal 500 karakter per post, bisa multi-thread.
+
+OUTPUT FORMAT (wajib JSON):
+{
+  "hook": "Kalimat pembuka yang bikin orang berhenti scroll (1 kalimat)",
+  "caption": "Isi konten lengkap, natural sesuai persona (max 400 karakter)",
+  "cta": "Call to action ringan, tidak hard sell (1 kalimat)",
+  "hashtags": ["3-5 hashtag relevan"],
+  "content_type_used": "tips/review/relatable/cta",
+  "product_category": "Kategori produk yang disebut/diimply",
+  "posting_tip": "1 tips singkat cara posting konten ini biar performanya bagus"
+}
+
+Jangan keluar dari persona. Jangan pakai bahasa formal atau bahasa iklan.
+Respond HANYA dengan JSON valid. Tidak ada teks lain.
+---
+
+## User Prompt Template
+
+Yang lo kirim sebagai user message:
+
+Buatkan konten Threads untuk hari {hari} ({tanggal}).
+
+Jenis konten: {content_type.label}
+Topik/produk (opsional): {user_input || "bebas, sesuai niche persona"}
+Tone hari ini: {tone_modifier || "normal"} 
+  // options: "lebih lucu", "lebih serius", "promosi akhir bulan", dll
+
+Pastikan konten terasa natural dan tidak seperti iklan.
+---
+
+## Alur Aplikasi
+
+`
+1. User pilih persona (dari 10 kartu)
+         ↓
+2. User pilih jenis konten ATAU klik "Auto" (random sesuai komposisi %)
+[11/05/2026 11:37] Iman: ↓
+3. (Opsional) User isi topik/produk spesifik
+         ↓
+4. Klik Generate
+         ↓
+5. POST ke /v1/messages dengan:
+   - system: persona prompt
+   - user: request harian
+   - model: claude-sonnet-4-20250514
+   - max_tokens: 600
+         ↓
+6. Parse JSON response
+         ↓
+7. Tampilkan:
+   - Hook
+   - Caption
+   - CTA
+   - Hashtags (klik = copy)
+   - Posting tip
+         ↓
+8. Tombol: [Copy Semua] [Regenerate] [Simpan ke History]
+
+---
+
+## API Call (contoh fetch)
+
+js
+async function generateContent(persona, contentType, userInput, apiKey) {
+  const systemPrompt = buildSystemPrompt(persona);
+  const userPrompt = buildUserPrompt(contentType, userInput);
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 600,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }]
+    })
+  });
+
+  const data = await res.json();
+  const raw = data.content[0].text;
+
+  // Strip backticks kalau ada
+  const clean = raw.replace(/
+  return JSON.parse(clean);
+}
+---
+
+## Output JSON yang Diharapkan
+
+{
+  "hook": "Bapak baru nemu trik yang udah bikin hemat 200rb sebulan.",
+  "caption": "Jadi gini — bapak biasanya beli sabun di supermarket. Ternyata kalo beli di marketplace pas flash sale, bisa hemat sampe 40%. Bapak udah lakuin ini 3 bulan, lumayan buat jajan bapak sendiri 😂",
+  "cta": "Mau tau kapan flash sale-nya? Bapak tandain di link ini.",
+  "hashtags": ["#BapakHemat", "#TipsBelanja", "#HeritBapak", "#FlashSale"],
+  "content_type_used": "tips",
+  "product_category": "Kebutuhan rumah tangga / FMCG",
+  "posting_tip": "Posting antara jam 7-9 pagi atau 8-10 malam. Tambah foto produk asli biar lebih dipercaya."
+}
+---
+
+## Fitur Tambahan (Opsional, V2)
+
+| Fitur | Deskripsi |
+|---|---|
+| Auto Schedule | Generate 7 konten sekaligus (1 minggu), sesuai komposisi % |
+| Variant A/B | Generate 2 versi caption, user pilih yang mana |
+| History Log | Simpan konten yang sudah dibuat per persona |
+| Tone Modifier | Dropdown: Normal / Humor / Promosi / Edukasi |
+| Produk Input | User bisa input nama produk spesifik + harga |
+| Copy Format | Copy dalam format siap paste ke Threads |
+
+---
+
+## Catatan Penting
+
+- Jangan hardcode API key di frontend. Kalau production, route lewat backend/server action.
+- Response Claude kadang bungkus JSON dalam  ``json
+- Kalau user gak isi topik, biarkan Claude bebas milih dari niche persona — hasilnya lebih natural.
+- Komposisi konten (40/30/20/10) bisa dijadikan logic auto-select jenis konten biar feed-nya seimbang.
+
+---
+
+## File Structure Saran
+
+/
+├── data/
+│   └── personas.js          ← 10 persona objects
+├── lib/
+│   ├── prompts.js           ← buildSystemPrompt() + buildUserPrompt()
+│   └── claude.js            ← generateContent() API call
+├── components/
+│   ├── PersonaPicker.jsx
+│   ├── ContentForm.jsx
+│   └── OutputCard.jsx
+└── pages/ (atau app/)
+    └── index.jsx            ← main page
+`
+
+---
+
+*Blueprint v1.0 — sambungin Claude Sonnet, langsung jalan.*

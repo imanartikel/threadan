@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Daily Affiliate Content Generator</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">TH</div>
+          <div>
+            <h1>Threads Affiliate</h1>
+            <p id="apiStatus">Checking server...</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Persona</div>
+          <div id="personaList" class="persona-list"></div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <section class="generator">
+          <div class="toolbar">
+            <div>
+              <h2>Generate Konten Harian</h2>
+              <p id="selectedPersona">Pilih persona dulu.</p>
+            </div>
+            <button id="regenerateBtn" class="secondary" type="button" disabled>Regenerate</button>
+          </div>
+
+          <form id="contentForm" class="form-grid">
+            <label>
+              Jenis konten
+              <select id="contentType"></select>
+            </label>
+            <label>
+              Tone
+              <select id="tone"></select>
+            </label>
+            <label class="wide">
+              Topik atau produk
+              <input id="topic" type="text" placeholder="Kosongkan kalau mau bebas sesuai niche">
+            </label>
+            <div class="button-stack">
+              <button id="generateBtn" type="submit">Generate 1 Post</button>
+              <button id="generateWeekBtn" class="secondary" type="button">Generate 7 Hari</button>
+            </div>
+          </form>
+
+          <div id="message" class="message" hidden></div>
+
+          <section id="output" class="output empty">
+            <div class="empty-state">
+              <div class="empty-mark">POST</div>
+              <h3>Output muncul di sini</h3>
+              <p>Pilih persona, isi opsi, lalu generate.</p>
+            </div>
+          </section>
+        </section>
+
+        <section class="history-wrap">
+          <div class="section-header">
+            <h2>History</h2>
+            <button id="clearHistoryBtn" class="ghost" type="button">Clear</button>
+          </div>
+          <div id="historyList" class="history-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

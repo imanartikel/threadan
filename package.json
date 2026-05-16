@@ -1,0 +1,14 @@
+{
+  "name": "daily-affiliate-content-generator",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Threads affiliate content generator powered by Claude Sonnet.",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "node --use-system-ca server.js",
+    "start": "node --use-system-ca server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

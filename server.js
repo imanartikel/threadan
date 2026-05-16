@@ -1,0 +1,533 @@
+const http = require("node:http");
+const fs = require("node:fs/promises");
+const fsSync = require("node:fs");
+const path = require("node:path");
+const {
+  contentTypes,
+  toneModifiers,
+  weeklyDays,
+  personas,
+  getContentType,
+  getPersona,
+  pickWeightedContentType,
+  buildSystemPrompt,
+  buildUserPrompt,
+  buildWeeklySystemPrompt,
+  buildWeeklyUserPrompt
+} = require("./src/content");
+
+loadEnvFile(path.join(__dirname, ".env"));
+
+const PORT = Number(process.env.PORT || 3000);
+const PUBLIC_DIR = path.join(__dirname, "public");
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
+const ANTHROPIC_VERSION = "2023-06-01";
+
+const mimeTypes = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".ico": "image/x-icon"
+};
+
+function loadEnvFile(filePath) {
+  if (!fsSync.existsSync(filePath)) return;
+
+  const content = fsSync.readFileSync(filePath, "utf8");
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const equalsIndex = line.indexOf("=");
+    if (equalsIndex === -1) continue;
+
+    const key = line.slice(0, equalsIndex).trim();
+    let value = line.slice(equalsIndex + 1).trim();
+
+    if (!key || process.env[key] !== undefined) continue;
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    process.env[key] = value;
+  }
+}
+
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body)
+  });
+  res.end(body);
+}
+
+function sendText(res, status, message) {
+  res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end(message);
+}
+
+async function readRequestBody(req) {
+  const chunks = [];
+  let size = 0;
+
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 64_000) {
+      throw new Error("Request terlalu besar.");
+    }
+    chunks.push(chunk);
+  }
+
+  if (!chunks.length) return {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
+function stripJsonFence(text) {
+  return text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+
+function parseClaudeJson(text) {
+  const clean = stripJsonFence(text);
+  const candidate = extractJsonCandidate(clean);
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return JSON.parse(repairCommonJsonIssues(candidate));
+  }
+}
+
+function extractJsonCandidate(clean) {
+  const objectStart = clean.indexOf("{");
+  const objectEnd = clean.lastIndexOf("}");
+  const arrayStart = clean.indexOf("[");
+  const arrayEnd = clean.lastIndexOf("]");
+  const useArray =
+    arrayStart !== -1 &&
+    arrayEnd !== -1 &&
+    (objectStart === -1 || arrayStart < objectStart);
+  const start = useArray ? arrayStart : objectStart;
+  const end = useArray ? arrayEnd : objectEnd;
+
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Claude tidak membalas JSON valid.");
+  }
+
+  return clean.slice(start, end + 1);
+}
+
+function repairCommonJsonIssues(jsonText) {
+  return jsonText
+    .replace(/,\s*([}\]])/g, "$1")
+    .replace(/([\[,]\s*)(#[A-Za-z0-9_]+)/g, '$1"$2"')
+    .replace(/:\s*(#[A-Za-z0-9_]+)/g, ': "$1"');
+}
+
+async function repairJsonWithClaude({ apiKey, rawText }) {
+  const result = await callAnthropic({
+    apiKey,
+    maxTokens: 5000,
+    temperature: 0,
+    system: [
+      "Kamu adalah JSON repair tool.",
+      "Tugasmu hanya memperbaiki teks menjadi JSON valid.",
+      "Jangan ubah isi konten, jangan tambah data baru, jangan jelaskan apa pun.",
+      "Balas hanya JSON valid."
+    ].join("\n"),
+    user: [
+      "Perbaiki respons berikut menjadi JSON valid.",
+      "Pastikan semua string, termasuk hashtag, memakai tanda kutip.",
+      "",
+      rawText
+    ].join("\n")
+  });
+
+  if (!result.ok) {
+    throw new Error(result.error || "Gagal repair JSON.");
+  }
+
+  return parseClaudeJson(normalizeClaudeText(result.data));
+}
+
+function normalizeClaudeText(data) {
+  if (!Array.isArray(data.content)) return "";
+  return data.content
+    .filter((block) => block && block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+function todayInJakarta() {
+  const date = new Date();
+  const dateLabel = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    dateStyle: "full"
+  }).format(date);
+  const dayName = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    weekday: "long"
+  }).format(date);
+
+  return { dayName, dateLabel };
+}
+
+function weeklyRangeInJakarta() {
+  const now = new Date();
+  const jakartaDate = new Date(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(now)
+  );
+  const day = jakartaDate.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const start = new Date(jakartaDate);
+  start.setDate(jakartaDate.getDate() + diffToMonday);
+  const end = new Date(start);
+  end.setDate(start.getDate() + 6);
+
+  const formatter = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    dateStyle: "full"
+  });
+
+  return {
+    weekStartLabel: formatter.format(start),
+    weekEndLabel: formatter.format(end)
+  };
+}
+
+async function callAnthropic({ apiKey, system, user, maxTokens, temperature = 0.8 }) {
+  let anthropicResponse;
+  try {
+    anthropicResponse = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": ANTHROPIC_VERSION
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: maxTokens,
+        temperature,
+        system,
+        messages: [{ role: "user", content: user }]
+      })
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      status: 502,
+      error: "Gagal menghubungi Anthropic API.",
+      detail: error.message,
+      cause: error.cause
+        ? {
+            name: error.cause.name,
+            code: error.cause.code,
+            message: error.cause.message
+          }
+        : undefined
+    };
+  }
+
+  let data;
+  try {
+    data = await anthropicResponse.json();
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      error: "Response Anthropic bukan JSON."
+    };
+  }
+
+  if (!anthropicResponse.ok) {
+    return {
+      ok: false,
+      status: anthropicResponse.status,
+      error: data.error?.message || "Anthropic API menolak request.",
+      detail: data
+    };
+  }
+
+  return { ok: true, data };
+}
+
+async function generateContent(req, res) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    sendJson(res, 500, {
+      error: "ANTHROPIC_API_KEY belum diset di environment server."
+    });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message || "Body request tidak valid." });
+    return;
+  }
+
+  const persona = getPersona(body.personaId);
+  if (!persona) {
+    sendJson(res, 400, { error: "Persona tidak ditemukan." });
+    return;
+  }
+
+  const contentType =
+    body.contentTypeId === "auto"
+      ? pickWeightedContentType(persona)
+      : getContentType(body.contentTypeId);
+
+  if (!contentType) {
+    sendJson(res, 400, { error: "Jenis konten tidak ditemukan." });
+    return;
+  }
+
+  const selectedTone =
+    toneModifiers.find((tone) => tone.id === body.toneId)?.label || "Normal";
+  const dateInfo = todayInJakarta();
+  const system = buildSystemPrompt(persona);
+  const user = buildUserPrompt({
+    contentType,
+    topic: body.topic,
+    tone: selectedTone,
+    ...dateInfo
+  });
+
+  const result = await callAnthropic({ apiKey, system, user, maxTokens: 700 });
+  if (!result.ok) {
+    sendJson(res, result.status, { error: result.error, detail: result.detail, cause: result.cause });
+    return;
+  }
+
+  const rawText = normalizeClaudeText(result.data);
+  try {
+    const output = parseClaudeJson(rawText);
+    sendJson(res, 200, {
+      output,
+      meta: {
+        persona: persona.name,
+        personaId: persona.id,
+        contentType: contentType.label,
+        contentTypeId: contentType.id,
+        tone: selectedTone,
+        model: MODEL,
+        generatedAt: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    try {
+      const output = await repairJsonWithClaude({ apiKey, rawText });
+      sendJson(res, 200, {
+        output,
+        meta: {
+          persona: persona.name,
+          personaId: persona.id,
+          contentType: contentType.label,
+          contentTypeId: contentType.id,
+          tone: selectedTone,
+          model: MODEL,
+          generatedAt: new Date().toISOString(),
+          repairedJson: true
+        }
+      });
+    } catch (repairError) {
+      sendJson(res, 502, {
+        error: repairError.message || error.message,
+        raw: rawText
+      });
+    }
+  }
+}
+
+async function generateWeeklyContent(req, res) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    sendJson(res, 500, {
+      error: "ANTHROPIC_API_KEY belum diset di environment server."
+    });
+    return;
+  }
+
+  let body;
+  try {
+    body = await readRequestBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message || "Body request tidak valid." });
+    return;
+  }
+
+  const persona = getPersona(body.personaId);
+  if (!persona) {
+    sendJson(res, 400, { error: "Persona tidak ditemukan." });
+    return;
+  }
+
+  const selectedTone =
+    toneModifiers.find((tone) => tone.id === body.toneId)?.label || "Normal";
+  const weekRange = weeklyRangeInJakarta();
+  const system = buildWeeklySystemPrompt(persona);
+  const user = buildWeeklyUserPrompt({
+    topic: body.topic,
+    tone: selectedTone,
+    ...weekRange
+  });
+
+  const result = await callAnthropic({ apiKey, system, user, maxTokens: 4200 });
+  if (!result.ok) {
+    sendJson(res, result.status, { error: result.error, detail: result.detail, cause: result.cause });
+    return;
+  }
+
+  const rawText = normalizeClaudeText(result.data);
+  try {
+    const output = parseClaudeJson(rawText);
+    const items = Array.isArray(output) ? output : output.items;
+
+    if (!Array.isArray(items) || items.length !== 7) {
+      throw new Error("Claude tidak membalas 7 item kalender.");
+    }
+
+    sendJson(res, 200, {
+      output: {
+        week_title: output.week_title || `Kalender ${persona.name}`,
+        items
+      },
+      meta: {
+        persona: persona.name,
+        personaId: persona.id,
+        contentType: "Kalender 7 Hari",
+        contentTypeId: "weekly",
+        tone: selectedTone,
+        model: MODEL,
+        generatedAt: new Date().toISOString(),
+        ...weekRange
+      }
+    });
+  } catch (error) {
+    try {
+      const output = await repairJsonWithClaude({ apiKey, rawText });
+      const items = Array.isArray(output) ? output : output.items;
+
+      if (!Array.isArray(items) || items.length !== 7) {
+        throw new Error("Claude tidak membalas 7 item kalender.");
+      }
+
+      sendJson(res, 200, {
+        output: {
+          week_title: output.week_title || `Kalender ${persona.name}`,
+          items
+        },
+        meta: {
+          persona: persona.name,
+          personaId: persona.id,
+          contentType: "Kalender 7 Hari",
+          contentTypeId: "weekly",
+          tone: selectedTone,
+          model: MODEL,
+          generatedAt: new Date().toISOString(),
+          repairedJson: true,
+          ...weekRange
+        }
+      });
+    } catch (repairError) {
+      sendJson(res, 502, {
+        error: repairError.message || error.message,
+        raw: rawText
+      });
+    }
+  }
+}
+
+async function serveStatic(req, res, pathname) {
+  const requested = pathname === "/" ? "/index.html" : pathname;
+  const filePath = path.resolve(PUBLIC_DIR, `.${decodeURIComponent(requested)}`);
+
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    sendText(res, 403, "Forbidden");
+    return;
+  }
+
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile()) {
+      sendText(res, 404, "Not found");
+      return;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const content = await fs.readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": mimeTypes[ext] || "application/octet-stream",
+      "Cache-Control": "no-store"
+    });
+    res.end(content);
+  } catch {
+    sendText(res, 404, "Not found");
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    sendJson(res, 200, {
+      personas,
+      contentTypes,
+      toneModifiers,
+      weeklyDays,
+      hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY),
+      model: MODEL
+    });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/health") {
+    sendJson(res, 200, { ok: true, hasApiKey: Boolean(process.env.ANTHROPIC_API_KEY) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/generate") {
+    await generateContent(req, res);
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/generate-week") {
+    await generateWeeklyContent(req, res);
+    return;
+  }
+
+  if (req.method !== "GET") {
+    sendText(res, 405, "Method not allowed");
+    return;
+  }
+
+  await serveStatic(req, res, url.pathname);
+});
+
+server.listen(PORT, "127.0.0.1", () => {
+  console.log(`Daily Affiliate Content Generator running at http://127.0.0.1:${PORT}`);
+  console.log(`Anthropic key: ${process.env.ANTHROPIC_API_KEY ? "ready" : "missing"}`);
+});
