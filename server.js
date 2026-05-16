@@ -489,7 +489,7 @@ async function serveStatic(req, res, pathname) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+const requestHandler = async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
   if (req.method === "GET" && url.pathname === "/api/config") {
@@ -525,9 +525,14 @@ const server = http.createServer(async (req, res) => {
   }
 
   await serveStatic(req, res, url.pathname);
-});
+};
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Daily Affiliate Content Generator running at http://127.0.0.1:${PORT}`);
-  console.log(`Anthropic key: ${process.env.ANTHROPIC_API_KEY ? "ready" : "missing"}`);
-});
+if (process.env.VERCEL) {
+  module.exports = requestHandler;
+} else {
+  const server = http.createServer(requestHandler);
+  server.listen(PORT, "127.0.0.1", () => {
+    console.log(`Daily Affiliate Content Generator running at http://127.0.0.1:${PORT}`);
+    console.log(`Anthropic key: ${process.env.ANTHROPIC_API_KEY ? "ready" : "missing"}`);
+  });
+}
