@@ -531,8 +531,8 @@ if (process.env.VERCEL) {
   module.exports = requestHandler;
 } else {
   const server = http.createServer(requestHandler);
-  server.listen(PORT, "127.0.0.1", () => {
-    console.log(`Daily Affiliate Content Generator running at http://127.0.0.1:${PORT}`);
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Daily Affiliate Content Generator running at http://0.0.0.0:${PORT}`);
     console.log(`Anthropic key: ${process.env.ANTHROPIC_API_KEY ? "ready" : "missing"}`);
   });
 }
