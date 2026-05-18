@@ -215,7 +215,36 @@ function weeklyRangeInJakarta() {
   };
 }
 
-async function callAnthropic({ apiKey, system, user, maxTokens, temperature = 0.8 }) {
+function getWeeklyDateLabels() {
+  const now = new Date();
+  const jakartaDate = new Date(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(now)
+  );
+  const day = jakartaDate.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const start = new Date(jakartaDate);
+  start.setDate(jakartaDate.getDate() + diffToMonday);
+
+  const formatter = new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta",
+    dateStyle: "full"
+  });
+
+  const labels = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    labels.push(formatter.format(d));
+  }
+  return labels;
+}
+
+async function callAnthropicBase({ apiKey, system, user, maxTokens, temperature = 0.8 }) {
   let anthropicResponse;
   try {
     anthropicResponse = await fetch("https://api.anthropic.com/v1/messages", {
@@ -270,6 +299,32 @@ async function callAnthropic({ apiKey, system, user, maxTokens, temperature = 0.
   }
 
   return { ok: true, data };
+}
+
+async function callAnthropic({ apiKey, system, user, maxTokens, temperature = 0.8 }, maxRetries = 3) {
+  let delay = 2000;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const result = await callAnthropicBase({ apiKey, system, user, maxTokens, temperature });
+    if (result.ok) {
+      return result;
+    }
+
+    const isRetryable =
+      !result.status || // Network failure
+      result.status === 429 || // Rate Limit
+      result.status === 529 || // Overloaded
+      result.status === 503 || // Service Unavailable
+      result.status >= 500;    // Server errors
+
+    if (!isRetryable || attempt === maxRetries) {
+      return result;
+    }
+
+    const jitter = Math.random() * 1000;
+    const waitTime = delay * attempt + jitter;
+    console.warn(`[Anthropic API] Attempt ${attempt} failed (status: ${result.status || 'network'}). Retrying in ${Math.round(waitTime)}ms...`);
+    await new Promise((resolve) => setTimeout(resolve, waitTime));
+  }
 }
 
 async function generateContent(req, res) {
@@ -387,32 +442,74 @@ async function generateWeeklyContent(req, res) {
 
   const selectedTone =
     toneModifiers.find((tone) => tone.id === body.toneId)?.label || "Normal";
-  const weekRange = weeklyRangeInJakarta();
-  const system = buildWeeklySystemPrompt(persona);
-  const user = buildWeeklyUserPrompt({
-    topic: body.topic,
-    tone: selectedTone,
-    ...weekRange
-  });
 
-  const result = await callAnthropic({ apiKey, system, user, maxTokens: 4200 });
-  if (!result.ok) {
-    sendJson(res, result.status, { error: result.error, detail: result.detail, cause: result.cause });
-    return;
+  const dateLabels = getWeeklyDateLabels();
+  const dayConfigs = [
+    { day: "Senin", contentTypeId: "tips", toneVariation: "edukatif dan praktis" },
+    { day: "Selasa", contentTypeId: "review", toneVariation: "review jujur, sebut alasan worth it" },
+    { day: "Rabu", contentTypeId: "relatable", toneVariation: "relatable dan ringan" },
+    { day: "Kamis", contentTypeId: "tips", toneVariation: "edukatif dengan checklist kecil" },
+    { day: "Jumat", contentTypeId: "review", toneVariation: "review/comparison, cocok untuk sisip link" },
+    { day: "Sabtu", contentTypeId: "relatable", toneVariation: "relatable dengan problem-solution" },
+    { day: "Minggu", contentTypeId: "cta", toneVariation: "soft sell paling jelas, tapi tetap ditutup pertanyaan" }
+  ];
+
+  async function generateSingleDay(dayConfig, dateLabel) {
+    const contentType = getContentType(dayConfig.contentTypeId);
+    if (!contentType) {
+      throw new Error(`Jenis konten ${dayConfig.contentTypeId} tidak ditemukan.`);
+    }
+
+    const system = buildSystemPrompt(persona);
+    const user = buildUserPrompt({
+      contentType,
+      topic: body.topic,
+      tone: `${selectedTone} (${dayConfig.toneVariation})`,
+      dayName: dayConfig.day,
+      dateLabel
+    });
+
+    const result = await callAnthropic({ apiKey, system, user, maxTokens: 700 });
+    if (!result.ok) {
+      throw new Error(`Gagal generate konten untuk ${dayConfig.day}: ${result.error}`);
+    }
+
+    const rawText = normalizeClaudeText(result.data);
+    let output;
+    try {
+      output = parseClaudeJson(rawText);
+    } catch (error) {
+      try {
+        output = await repairJsonWithClaude({ apiKey, rawText });
+      } catch (repairError) {
+        throw new Error(`JSON rusak pada ${dayConfig.day} dan gagal diperbaiki.`);
+      }
+    }
+
+    const hashtags = Array.isArray(output.hashtags) ? output.hashtags : [];
+
+    return {
+      day: dayConfig.day,
+      content_type_used: contentType.label,
+      hook: output.hook || "",
+      caption: output.caption || "",
+      cta: output.cta || "",
+      hashtags: hashtags,
+      product_category: output.product_category || body.topic || "Umum",
+      posting_tip: output.posting_tip || ""
+    };
   }
 
-  const rawText = normalizeClaudeText(result.data);
   try {
-    const output = parseClaudeJson(rawText);
-    const items = Array.isArray(output) ? output : output.items;
+    const promises = dayConfigs.map((config, index) =>
+      generateSingleDay(config, dateLabels[index])
+    );
 
-    if (!Array.isArray(items) || items.length !== 7) {
-      throw new Error("Claude tidak membalas 7 item kalender.");
-    }
+    const items = await Promise.all(promises);
 
     sendJson(res, 200, {
       output: {
-        week_title: output.week_title || `Kalender ${persona.name}`,
+        week_title: `Kalender Konten ${persona.name}`,
         items
       },
       meta: {
@@ -423,41 +520,14 @@ async function generateWeeklyContent(req, res) {
         tone: selectedTone,
         model: MODEL,
         generatedAt: new Date().toISOString(),
-        ...weekRange
+        weekStartLabel: dateLabels[0],
+        weekEndLabel: dateLabels[6]
       }
     });
   } catch (error) {
-    try {
-      const output = await repairJsonWithClaude({ apiKey, rawText });
-      const items = Array.isArray(output) ? output : output.items;
-
-      if (!Array.isArray(items) || items.length !== 7) {
-        throw new Error("Claude tidak membalas 7 item kalender.");
-      }
-
-      sendJson(res, 200, {
-        output: {
-          week_title: output.week_title || `Kalender ${persona.name}`,
-          items
-        },
-        meta: {
-          persona: persona.name,
-          personaId: persona.id,
-          contentType: "Kalender 7 Hari",
-          contentTypeId: "weekly",
-          tone: selectedTone,
-          model: MODEL,
-          generatedAt: new Date().toISOString(),
-          repairedJson: true,
-          ...weekRange
-        }
-      });
-    } catch (repairError) {
-      sendJson(res, 502, {
-        error: repairError.message || error.message,
-        raw: rawText
-      });
-    }
+    sendJson(res, 502, {
+      error: error.message || "Gagal generate kalender mingguan."
+    });
   }
 }
 
