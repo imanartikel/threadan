@@ -524,11 +524,12 @@ async function generateWeeklyContent(req, res) {
   }
 
   try {
-    const promises = dayConfigs.map((config, index) =>
-      generateSingleDay(config, dateLabels[index])
-    );
-
-    const items = await Promise.all(promises);
+    const items = [];
+    for (let i = 0; i < dayConfigs.length; i++) {
+      const config = dayConfigs[i];
+      const item = await generateSingleDay(config, dateLabels[i]);
+      items.push(item);
+    }
 
     const responsePayload = {
       output: {

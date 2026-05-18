@@ -6,7 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "dev": "node --use-system-ca server.js",
-    "start": "node server.js"
+    "start": "node --max-old-space-size=380 server.js"
   },
   "engines": {
     "node": ">=20"
