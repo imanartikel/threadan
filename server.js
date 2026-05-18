@@ -22,6 +22,7 @@ const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
 const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
 const ANTHROPIC_VERSION = "2023-06-01";
+const responseCache = new Map();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -363,6 +364,15 @@ async function generateContent(req, res) {
   const selectedTone =
     toneModifiers.find((tone) => tone.id === body.toneId)?.label || "Normal";
   const dateInfo = todayInJakarta();
+
+  // Cache Check: If exact configuration generated today, return instantly!
+  const cacheKey = `single:${persona.id}:${contentType.id}:${body.toneId || "normal"}:${dateInfo.dateLabel}:${(body.topic || "").trim().toLowerCase()}`;
+  if (!body.force && responseCache.has(cacheKey)) {
+    console.log(`[Cache Hit] Single content loaded instantly for key: ${cacheKey}`);
+    sendJson(res, 200, responseCache.get(cacheKey));
+    return;
+  }
+
   const system = buildSystemPrompt(persona);
   const user = buildUserPrompt({
     contentType,
@@ -380,7 +390,7 @@ async function generateContent(req, res) {
   const rawText = normalizeClaudeText(result.data);
   try {
     const output = parseClaudeJson(rawText);
-    sendJson(res, 200, {
+    const responsePayload = {
       output,
       meta: {
         persona: persona.name,
@@ -391,11 +401,13 @@ async function generateContent(req, res) {
         model: MODEL,
         generatedAt: new Date().toISOString()
       }
-    });
+    };
+    responseCache.set(cacheKey, responsePayload);
+    sendJson(res, 200, responsePayload);
   } catch (error) {
     try {
       const output = await repairJsonWithClaude({ apiKey, rawText });
-      sendJson(res, 200, {
+      const responsePayload = {
         output,
         meta: {
           persona: persona.name,
@@ -407,7 +419,9 @@ async function generateContent(req, res) {
           generatedAt: new Date().toISOString(),
           repairedJson: true
         }
-      });
+      };
+      responseCache.set(cacheKey, responsePayload);
+      sendJson(res, 200, responsePayload);
     } catch (repairError) {
       sendJson(res, 502, {
         error: repairError.message || error.message,
@@ -444,6 +458,15 @@ async function generateWeeklyContent(req, res) {
     toneModifiers.find((tone) => tone.id === body.toneId)?.label || "Normal";
 
   const dateLabels = getWeeklyDateLabels();
+
+  // Cache Check: Jika konfigurasi persis sama sudah digenerate minggu ini, load instan!
+  const cacheKey = `week:${persona.id}:${body.toneId || "normal"}:${dateLabels[0]}:${dateLabels[6]}:${(body.topic || "").trim().toLowerCase()}`;
+  if (!body.force && responseCache.has(cacheKey)) {
+    console.log(`[Cache Hit] Weekly calendar loaded instantly for key: ${cacheKey}`);
+    sendJson(res, 200, responseCache.get(cacheKey));
+    return;
+  }
+
   const dayConfigs = [
     { day: "Senin", contentTypeId: "tips", toneVariation: "edukatif dan praktis" },
     { day: "Selasa", contentTypeId: "review", toneVariation: "review jujur, sebut alasan worth it" },
@@ -507,7 +530,7 @@ async function generateWeeklyContent(req, res) {
 
     const items = await Promise.all(promises);
 
-    sendJson(res, 200, {
+    const responsePayload = {
       output: {
         week_title: `Kalender Konten ${persona.name}`,
         items
@@ -523,7 +546,10 @@ async function generateWeeklyContent(req, res) {
         weekStartLabel: dateLabels[0],
         weekEndLabel: dateLabels[6]
       }
-    });
+    };
+
+    responseCache.set(cacheKey, responsePayload);
+    sendJson(res, 200, responsePayload);
   } catch (error) {
     sendJson(res, 502, {
       error: error.message || "Gagal generate kalender mingguan."

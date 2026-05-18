@@ -447,7 +447,9 @@ els.generateWeekBtn.addEventListener("click", () => {
 });
 
 els.regenerateBtn.addEventListener("click", () => {
-  if (state.lastRequest) generate(state.lastRequest, state.lastMode || "single");
+  if (state.lastRequest) {
+    generate({ ...state.lastRequest, force: true }, state.lastMode || "single");
+  }
 });
 
 els.clearHistoryBtn.addEventListener("click", () => {
