@@ -20,7 +20,7 @@ loadEnvFile(path.join(__dirname, ".env"));
 
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "public");
-const MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-4-20250514";
+const MODEL = process.env.ANTHROPIC_MODEL || "claude-3-haiku-20240307";
 const ANTHROPIC_VERSION = "2023-06-01";
 const responseCache = new Map();
 
